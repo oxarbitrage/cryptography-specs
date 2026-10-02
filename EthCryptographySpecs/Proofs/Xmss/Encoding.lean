@@ -215,6 +215,136 @@ theorem wotsEncode_incomparable
     simp only [not_exists, Nat.not_lt] at hno
     exact hne (eq_of_le_of_sum_eq hno (hx.trans hy.symm))
 
+/-! ## The size of the code
+
+A signer grinds randomizers until the digits land in the code.
+
+How often that succeeds is set by one number: how many digit vectors sum to the target.
+
+The specification note gives it as an inclusion-exclusion sum.
+
+Here it is counted directly, by a table over bounded compositions, and the two agree. -/
+
+/-- Digit strings of length `n`, each digit below `m`, summing to `s`.
+
+The first digit is `d`, and the others sum to what it leaves. -/
+def boundedCompositions (m : Nat) : Nat → Nat → Nat
+  | 0, s => if s = 0 then 1 else 0
+  | n + 1, s => ∑ d ∈ Finset.range m, if d ≤ s then boundedCompositions m n (s - d) else 0
+
+/-- Counting digit strings is counting bounded compositions. -/
+theorem card_sum_eq_boundedCompositions (m : Nat) : ∀ n s,
+    (Finset.univ.filter fun f : Fin n → Fin m => ∑ i, (f i : Nat) = s).card
+      = boundedCompositions m n s := by
+  intro n
+  induction n with
+  | zero =>
+    intro s
+    by_cases h : s = 0 <;> simp [boundedCompositions, h, eq_comm]
+  | succ n ih =>
+    intro s
+    -- Split a string into its first digit and the rest.
+    rw [Finset.card_filter, ← (Fin.consEquiv fun _ => Fin m).sum_comp,
+      Fintype.sum_prod_type]
+    simp only [Fin.consEquiv_apply, Fin.sum_univ_succ, Fin.cons_zero, Fin.cons_succ]
+    rw [boundedCompositions,
+      ← Fin.sum_univ_eq_sum_range (fun d => if d ≤ s then boundedCompositions m n (s - d) else 0)]
+    refine Finset.sum_congr rfl fun d _ => ?_
+    rw [← ih, ← Finset.card_filter]
+    -- The rest must sum to what the first digit leaves, if it leaves anything.
+    split_ifs with hd
+    · congr 1
+      ext g
+      simp only [Finset.mem_filter, Finset.mem_univ, true_and]
+      omega
+    · rw [Finset.card_eq_zero, Finset.filter_eq_empty_iff]
+      intro g _
+      omega
+
+/-- One row of the table: counts for one more digit, at every sum up to `b`. -/
+def compositionRow (m : Nat) (row : List Nat) (b : Nat) : List Nat :=
+  (List.range (b + 1)).map fun s =>
+    ((List.range m).map fun d => if d ≤ s then row.getD (s - d) 0 else 0).sum
+
+/-- The table of bounded compositions, row `n` holding the counts for length `n`.
+
+Each row is built from the one before, so the count takes `n` passes, not `m ^ n` cases. -/
+def compositionTable (m b : Nat) : Nat → List Nat
+  | 0 => (List.range (b + 1)).map fun s => if s = 0 then 1 else 0
+  | n + 1 => compositionRow m (compositionTable m b n) b
+
+private theorem list_sum_range (m : Nat) (f : Nat → Nat) :
+    ((List.range m).map f).sum = ∑ d ∈ Finset.range m, f d := by
+  induction m with
+  | zero => simp
+  | succ m ih =>
+    rw [List.range_succ, List.map_append, List.sum_append, ih, Finset.sum_range_succ]
+    simp
+
+private theorem getD_range_map {b s : Nat} (f : Nat → Nat) (hs : s ≤ b) :
+    ((List.range (b + 1)).map f).getD s 0 = f s := by
+  simp [List.getD_eq_getElem?_getD, List.getElem?_range (by omega : s < b + 1)]
+
+/-- The table holds the bounded-composition counts. -/
+theorem compositionTable_getD (m b : Nat) : ∀ n s, s ≤ b →
+    (compositionTable m b n).getD s 0 = boundedCompositions m n s := by
+  intro n
+  induction n with
+  | zero =>
+    intro s hs
+    rw [compositionTable, getD_range_map _ hs, boundedCompositions]
+  | succ n ih =>
+    intro s hs
+    rw [compositionTable, compositionRow, getD_range_map _ hs, list_sum_range,
+      boundedCompositions]
+    refine Finset.sum_congr rfl fun d _ => ?_
+    split_ifs with hd
+    · exact ih _ (by omega)
+    · rfl
+
+/-- The specification accepts exactly the digit vectors that sum to the target. -/
+theorem onTarget_ofFn_iff (f : Fin V → Fin CHAIN_LENGTH) :
+    Internal.onTarget (Vector.ofFn f) = true ↔ ∑ i, (f i : Nat) = TARGET_SUM := by
+  simp only [Internal.onTarget, beq_iff_eq, digitSum_eq_sum, Fin.getElem_fin,
+    Vector.getElem_ofFn]
+
+/-- The code has `11539185377238682781344003244544752` codewords.
+
+That is the number of ways 42 digits between 0 and 7 can sum to 195. -/
+theorem card_code :
+    (Finset.univ.filter fun f : Fin V → Fin CHAIN_LENGTH =>
+      Internal.onTarget (Vector.ofFn f) = true).card
+        = 11539185377238682781344003244544752 := by
+  simp only [onTarget_ofFn_iff]
+  rw [card_sum_eq_boundedCompositions,
+    ← compositionTable_getD _ TARGET_SUM _ _ le_rfl]
+  -- 42 passes over a table of 196 sums, evaluated by the kernel.
+  decide +kernel
+
+/-- The note's inclusion-exclusion count, term `b` correcting for `b` digits above 7.
+
+Terms stop at `b = 24`, the last with `8 * b ≤ 195`. -/
+theorem inclusionExclusion_eq :
+    ∑ b ∈ Finset.range (TARGET_SUM / CHAIN_LENGTH + 1),
+      (-1 : Int) ^ b * (V.choose b : Int)
+        * ((TARGET_SUM - CHAIN_LENGTH * b + V - 1).choose (V - 1) : Int)
+      = 11539185377238682781344003244544752 := by
+  -- Falling factorials keep each binomial to 41 multiplications.
+  simp only [Nat.choose_eq_descFactorial_div_factorial]
+  decide +kernel
+
+/-- The code holds at least a `2 ^ -15` fraction of all digests.
+
+A digest has 128 bits, and a padded digest is accepted exactly when its digits are a codeword.
+
+So this is the note's bound on the chance that one grinding attempt is accepted. -/
+theorem acceptance_ge :
+    (2 : ℝ) ^ (-15 : ℤ) ≤
+      ((Finset.univ.filter fun f : Fin V → Fin CHAIN_LENGTH =>
+        Internal.onTarget (Vector.ofFn f) = true).card : ℝ) / 2 ^ 128 := by
+  rw [card_code]
+  norm_num
+
 /-! ## Known answer
 
 Pins the bit layout: which half a digit comes from, and where in that half. -/
